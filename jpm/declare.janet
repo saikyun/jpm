@@ -150,6 +150,211 @@
 
   declare-targets)
 
+
+(defn out-path-just-add-ext
+  [path ext]
+  (->> (string path ext)
+       (string/replace-all "\\" "___")
+       (string/replace-all "/" "___")
+       (string (find-build-dir))))
+
+(defn declare-native2
+  "Declare a native module. This is a shared library that can be loaded
+  dynamically by a janet runtime. This also builds a static libary that
+  can be used to bundle janet code and native into a single executable."
+  [&keys opts]
+  (def sources (opts :source))
+  (def name (opts :name))
+  (def path (string (dyn:modpath) "/" (dirname name)))
+  (def declare-targets @{})
+
+  (def modext (dyn:modext))
+  (def statext (dyn:statext))
+
+  # Make dynamic module
+  (def lname (string (find-build-dir) name modext))
+
+  # Get objects to build with
+  (var has-cpp false)
+
+  (def file-changed @{})
+
+  (defn add-file-changed
+    [path]
+    (or (get file-changed path)
+      (if-let [stat (os/stat path)]
+        (put file-changed path (stat :changed))
+        #(print "no stat for path: " path)
+        )))
+  
+  (defn get-deps
+    [src suffix op]
+    (def deps
+      (if (= suffix ".c")
+        (dependencies-c :cc opts src op)
+        (do (dependencies-c :c++ opts src op)
+            (set has-cpp true))))
+          
+    (spit (out-path-just-add-ext src "_deps") deps)
+    deps)
+  
+  (defn file-changed?
+    [path]
+    (when (add-file-changed path)
+      (def ppp (out-path-just-add-ext path "_changed"))
+      (def existing (try (string (slurp ppp))
+                      ([err fib] (print err) nil)))
+      (spit ppp (string (file-changed path)))
+
+      (def res (not= (string (file-changed path)) existing))
+
+      (when res
+        (print "changed! because " path " changed, old: " (file-changed path) " == " existing))
+
+      res))
+  
+  (def objects
+    (seq [src :in sources]
+      (def suffix
+        (cond
+          (string/has-suffix? ".cpp" src) ".cpp"
+          (string/has-suffix? ".cc" src) ".cc"
+          (string/has-suffix? ".c" src) ".c"
+          (errorf "unknown source file type: %s, expected .c, .cc, or .cpp" src)))
+
+      (def op (out-path src suffix ".o"))
+
+      (def deps
+        (if (file-changed? src)
+          (get-deps src suffix op)
+
+          (do
+            (def existing
+              (try
+                (slurp (out-path-just-add-ext src "_deps"))
+                ([err fib] (print err))
+              ))
+
+            (if existing
+              existing
+              (get-deps src suffix op)))))
+
+        
+      # (printf "deps before: %p\n\n" deps)
+
+      (def deps (string/replace "\n" "" deps))
+      (def deps (string/replace "\\" "" deps))
+      (def deps (string/split " " deps))
+
+
+      # (printf "deps: %p\n\n" deps)
+
+      (var changed false)
+
+      (loop [path :in (drop 1 deps)
+             :when (not (empty? path))]
+        (when (file-changed? path)
+          (set changed true)))
+
+      (when changed
+      
+          (print "compiling " src)
+          (if (= suffix ".c")
+            (compile-c :cc opts src op)
+            (do (compile-c :c++ opts src op)
+                (set has-cpp true))))
+
+      # (printf "deps: %p\n" deps "\n\n")
+      
+      
+
+
+
+      #### last changed according to os stat
+      (comment
+        (def ppp (out-path src suffix "_changed"))
+        (def last-changed (string ((os/stat src) :changed)))
+
+        (unless (= last-changed (string (slurp ppp)))
+          (print "last changed: " last-changed ", current: " (slurp ppp) " types: " (type last-changed) "/" (type (slurp ppp)))
+          (spit ppp (string ((os/stat src) :changed)))
+          (if (= suffix ".c")
+            (compile-c :cc opts src op)
+            (do (compile-c :c++ opts src op)
+                (set has-cpp true)))))
+
+      op))
+
+  (when-let [embedded (opts :embedded)]
+    (loop [src :in embedded]
+      (def c-src (out-path src ".janet" ".janet.c"))
+      (def o-src (out-path src ".janet" ".janet.o"))
+      (array/push objects o-src)
+      (create-buffer-c src c-src (embed-name src))
+      (compile-c :cc opts c-src o-src)))
+  (link-c has-cpp opts lname ;objects)
+  (put declare-targets :native lname)
+  (add-dep "build" lname)
+  (install-rule lname path)
+
+  # Add meta file
+  (def metaname (modpath-to-meta lname))
+  (def ename (entry-name name))
+  (rule metaname []
+        (print "generating meta file " metaname "...")
+        (flush)
+        (os/mkdir (find-build-dir))
+        (create-dirs metaname)
+        (spit metaname (string/format
+                         "# Metadata for static library %s\n\n%.20p"
+                         (string name statext)
+                         {:static-entry ename
+                          :cpp has-cpp
+                          :ldflags ~',(opts :ldflags)
+                          :lflags ~',(opts :lflags)})))
+  (add-dep "build" metaname)
+  (put declare-targets :meta metaname)
+  (install-rule metaname path)
+
+  # Make static module
+  (unless (dyn :nostatic)
+    (def sname (string (find-build-dir) name statext))
+    (def opts (merge @{:entry-name ename} opts))
+    (def sobjext ".static.o")
+    (def sjobjext ".janet.static.o")
+
+    # Get static objects
+    (def sobjects
+      (seq [src :in sources]
+        (def suffix
+          (cond
+            (string/has-suffix? ".cpp" src) ".cpp"
+            (string/has-suffix? ".cc" src) ".cc"
+            (string/has-suffix? ".c" src) ".c"
+            (errorf "unknown source file type: %s, expected .c, .cc, or .cpp" src)))
+        (def op (out-path src suffix sobjext))
+        (compile-c (if (= ".c" suffix) :cc :c++) opts src op true)
+        # Add artificial dep between static object and non-static object - prevents double errors
+        # when doing default builds.
+        (add-dep op (out-path src suffix ".o"))
+        op))
+
+    (when-let [embedded (opts :embedded)]
+      (loop [src :in embedded]
+        (def c-src (out-path src ".janet" ".janet.c"))
+        (def o-src (out-path src ".janet" sjobjext))
+        (array/push sobjects o-src)
+        # Buffer c-src is already declared by dynamic module
+        (compile-c :cc opts c-src o-src true)))
+
+    (archive-c opts sname ;sobjects)
+    (when (check-release)
+      (add-dep "build" sname))
+    (put declare-targets :static sname)
+    (install-rule sname path))
+
+  declare-targets)
+
 (defn declare-source
   "Create Janet modules. This does not actually build the module(s),
   but registers them for packaging and installation. :source should be an

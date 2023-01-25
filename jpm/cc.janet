@@ -98,6 +98,20 @@
           (clexe-shell cc ;defines "/c" ;cflags (string "/Fo" dest) src)
           (shell cc "-c" src ;defines ;cflags "-o" dest))))
 
+(defn dependencies-c
+  [compiler opts src dest &opt static?]
+  (def cc (opt opts compiler))
+  (def cflags [;(getflags opts compiler)
+               ;(if static? [] (dyn :dynamic-cflags))])
+  (def entry-defines (if-let [n (and static? (opts :entry-name))]
+                       [(make-define "JANET_ENTRY_NAME" n)]
+                       []))
+  (def defines [;(make-defines (opt opts :defines {})) ;entry-defines])
+  (def headers (or (opts :headers) []))
+  (if (dyn :is-msvc)
+    (clexe-shell cc ;defines "/c" ;cflags (string "/Fo" dest) src)
+    (exec-slurp cc "-MM" src ;defines ;cflags)))
+
 (defn link-c
   "Link C or C++ object files together to make a native module."
   [has-cpp opts target & objects]
