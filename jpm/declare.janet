@@ -80,6 +80,8 @@
           (set has-cpp true)))
       op))
 
+  (array/concat objects (get opts :objects []))
+
   (when-let [embedded (opts :embedded)]
     (loop [src :in embedded]
       (def c-src (out-path src ".janet" ".janet.c"))
