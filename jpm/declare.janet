@@ -47,7 +47,7 @@
     (rm manifest)
     (print "Uninstalled.")))
 
-(defn declare-native
+(defn old-declare-native
   "Declare a native module. This is a shared library that can be loaded
   dynamically by a janet runtime. This also builds a static libary that
   can be used to bundle janet code and native into a single executable."
@@ -160,7 +160,7 @@
        (string/replace-all "/" "___")
        (string (find-build-dir))))
 
-(defn declare-native2
+(defn declare-native
   "Declare a native module. This is a shared library that can be loaded
   dynamically by a janet runtime. This also builds a static libary that
   can be used to bundle janet code and native into a single executable."
@@ -206,6 +206,7 @@
       (def ppp (out-path-just-add-ext path "_changed"))
       (def existing (try (string (slurp ppp))
                       ([err fib] (print err) nil)))
+      (os/mkdir (find-build-dir))
       (spit ppp (string (file-changed path)))
 
       (def res (not= (string (file-changed path)) existing))
@@ -226,9 +227,13 @@
 
       (def op (out-path src suffix ".o"))
 
+
+      (var changed false)
+
       (def deps
         (if (file-changed? src)
-          (get-deps src suffix op)
+          (do (set changed true)
+            (get-deps src suffix op))
 
           (do
             (def existing
@@ -251,15 +256,13 @@
 
       # (printf "deps: %p\n\n" deps)
 
-      (var changed false)
-
       (loop [path :in (drop 1 deps)
-             :when (not (empty? path))]
-        (when (file-changed? path)
+             :when (not (empty? path))
+             :let [changed? (file-changed? path)]]
+        (when changed?
           (set changed true)))
 
       (when changed
-      
           (print "compiling " src)
           (if (= suffix ".c")
             (compile-c :cc opts src op)
@@ -324,6 +327,8 @@
     (def opts (merge @{:entry-name ename} opts))
     (def sobjext ".static.o")
     (def sjobjext ".janet.static.o")
+
+    (print "static?")
 
     # Get static objects
     (def sobjects
